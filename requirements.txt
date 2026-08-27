@@ -9,3 +9,6 @@ pillow==12.3.0
 python-dotenv==1.2.2
 groq==0.37.1
 httpx==0.28.1
+spacy==3.8.2
+# en_core_web_sm is not on PyPI — install separately (see README "Setup" step 3):
+#   pip install --trusted-host raw.githubusercontent.com --trusted-host github.com --trusted-host objects.githubusercontent.com https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl

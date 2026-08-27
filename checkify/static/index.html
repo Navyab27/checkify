@@ -184,6 +184,41 @@
   .methodology-block { background:var(--surface-2); border-radius:10px; padding:14px; font-size:12px; }
   .methodology-block table { width:100%; border-collapse:collapse; margin-top:8px; }
   .methodology-block td { padding:4px 0; border-top:1px solid var(--border); }
+
+  /* ---- Prompt 21: annotated transcript, naive-vs-checkify, evidence balance ---- */
+  .hl { border-radius:4px; padding:1px 3px; cursor:help; }
+  .hl:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+  .hl-risk { background:var(--danger-soft); color:var(--danger); font-weight:700; }
+  .hl-negated { background:transparent; color:var(--text-dim); text-decoration:line-through; text-decoration-thickness:1.5px; }
+  .hl-cautionary { background:var(--warning-soft); color:var(--warning); }
+  .hl-protective { background:var(--safe-soft); color:var(--safe); font-weight:600; }
+  .hl-reported { background:var(--info-soft); color:var(--info); }
+  .hl-neutral { background:transparent; text-decoration:underline; text-decoration-color:var(--text-dim); text-decoration-thickness:1.5px; }
+  .hl-naive { background:var(--danger-soft); color:var(--danger); font-weight:700; }
+  .hl-tag { font-size:8px; text-transform:uppercase; letter-spacing:.04em; padding:1px 4px; border-radius:3px; margin-left:3px; vertical-align:2px; border:1px solid currentColor; opacity:.85; white-space:nowrap; }
+  .naive-toggle-row { display:flex; align-items:center; gap:8px; font-size:12px; color:var(--text-dim); cursor:pointer; user-select:none; white-space:nowrap; }
+  .naive-toggle-row input { width:auto; }
+  .naive-compare { display:flex; gap:22px; flex-wrap:wrap; margin-bottom:14px; padding:12px 14px; background:var(--surface-2); border-radius:10px; }
+  .naive-compare .kv-value { font-size:20px; }
+  .tooltip-pop { position:fixed; max-width:280px; background:var(--text); color:var(--bg); font-size:11.5px; line-height:1.45; padding:8px 11px; border-radius:8px; box-shadow:var(--shadow); z-index:200; pointer-events:none; opacity:0; transition:opacity .1s; }
+  .tooltip-pop.show { opacity:1; }
+  @media (prefers-reduced-motion:reduce) { .tooltip-pop { transition:none; } }
+
+  .gauge-band-chip { display:inline-flex; align-items:center; gap:5px; font-size:11px; font-weight:700; padding:3px 9px; border-radius:999px; }
+
+  .balance-grid { display:grid; grid-template-columns:1fr 1fr; gap:24px; }
+  @media (max-width:700px) { .balance-grid { grid-template-columns:1fr; } }
+  .balance-col-title { font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--text-dim); margin:0 0 8px; }
+  .balance-item { margin-bottom:9px; }
+  .balance-item-label { font-size:12.3px; margin-bottom:3px; display:flex; justify-content:space-between; gap:8px; }
+  .balance-item-label b.mono { font-weight:600; }
+  .balance-bar-track { height:9px; background:var(--surface-2); border-radius:999px; overflow:hidden; }
+  .balance-bar { height:100%; border-radius:999px; cursor:help; }
+  .balance-bar.up { background:var(--danger); }
+  .balance-bar.down { background:var(--safe); }
+  .balance-neutral-row { display:flex; flex-wrap:wrap; gap:6px; margin-top:4px; }
+  .balance-neutral-chip { font-size:10.8px; color:var(--text-dim); background:var(--surface-2); border:1px solid var(--border); border-radius:999px; padding:3px 9px; cursor:help; }
+  .balance-empty { font-size:12px; color:var(--text-dim); font-style:italic; }
 </style>
 </head>
 <body>
@@ -236,6 +271,8 @@ if (location.protocol !== "http:" && location.protocol !== "https:") {
         <span class="example-chip" data-ex="suspicious">Try: suspicious forward</span>
         <span class="example-chip" data-ex="genuine">Try: genuine commentary</span>
       </div>
+      <div class="history-label" style="margin-top:14px;">Seed cases (offline, one click)</div>
+      <div class="examples" id="seedCaseChips"></div>
     </form>
 
     <div>
@@ -274,7 +311,7 @@ const EXAMPLES = {
   }
 };
 
-const STATE = { current: null, history: [], network: {nodes:[],edges:[]}, tab: "overview", selectedImageDataUrl: null };
+const STATE = { current: null, history: [], network: {nodes:[],edges:[]}, tab: "overview", selectedImageDataUrl: null, naiveMode: false };
 let toastTimer = null;
 
 /*
@@ -312,11 +349,113 @@ document.addEventListener("DOMContentLoaded", () => {
   const indicator = document.getElementById("apiBaseIndicator");
   if (indicator) indicator.textContent = API_BASE ? ("API: " + API_BASE) : "API: unreachable from this context";
   if (!API_BASE) showApiBaseBanner();
+  loadSeedCases();
+});
+
+/* Prompt 22, item 1: six saved cases reachable in one click from the empty state, pre-warmed
+   so a demo survives a dead venue wifi (DEMO_MODE=true on the server serves these from
+   fixtures — see server.py's SEED_CASES / DEMO_* dicts — with zero outbound network calls). */
+let DEMO_CASES = [];
+async function loadSeedCases(){
+  if (!API_BASE) return;
+  try {
+    const res = await fetch(apiUrl("/api/demo-cases"));
+    const data = await res.json();
+    DEMO_CASES = data.cases || [];
+    const holder = document.getElementById("seedCaseChips");
+    if (!holder) return;
+    holder.innerHTML = DEMO_CASES.map(c =>
+      `<span class="example-chip" data-seed="${esc(c.id)}" title="Expected: ${esc(c.expectedBand)}">${esc(c.id)}) ${esc(c.label)}</span>`
+    ).join("");
+    holder.querySelectorAll("[data-seed]").forEach(chip => {
+      chip.addEventListener("click", () => loadSeedCase(chip.dataset.seed));
+    });
+  } catch (e) { /* backend not reachable yet — sidebar quietly stays empty */ }
+}
+function loadSeedCase(id){
+  const c = DEMO_CASES.find(x => x.id === id);
+  if (!c) return;
+  resetToCleanState({ silent: true });
+  document.getElementById("textInput").value = c.text || "";
+  document.getElementById("urlInput").value = c.url || "";
+  document.getElementById("analyzeForm").requestSubmit();
+}
+
+/* Prompt 22, item 1: one keyboard shortcut resets the console to a clean state between demo
+   runs, so a judge doesn't watch a stale analysis while the presenter re-types a case. */
+function resetToCleanState(opts){
+  document.getElementById("textInput").value = "";
+  document.getElementById("urlInput").value = "";
+  imageInput.value = "";
+  imageHint.classList.remove("show"); imageThumb.classList.remove("show"); removeImageBtn.style.display = "none";
+  STATE.selectedImageDataUrl = null;
+  STATE.current = null;
+  STATE.naiveMode = false;
+  STATE.tab = "overview";
+  document.getElementById("main").innerHTML = `<div class="empty-state">
+    <h2>Submit a message, a link, a screenshot — or all three</h2>
+    <p>Upload a scam screenshot and Checkify reads it automatically (real OCR, not a placeholder) — you never need to retype what's already in the image. Every score is computed live: nothing here is pre-baked.</p>
+  </div>`;
+  if (!(opts && opts.silent)) showToast("Reset to a clean state (Esc)");
+}
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape") resetToCleanState();
 });
 
 function esc(s){ return (s??"").toString().replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+function escAttr(s){ return (s??"").toString().replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
 function bandColor(score){ if (score>=70) return "danger"; if (score>=35) return "warning"; return "safe"; }
 function sevColor(sev){ return {HIGH:"danger", MEDIUM:"warning", LOW:"info", SAFE:"safe"}[sev] || "info"; }
+// Prompt 21 rule: gauge bands are 0-29 Low / 30-59 Needs review / 60-79 High / 80-100 Very high,
+// and color is never the only signal — every chip built from this also carries the icon+label.
+function gaugeBandMeta(score){
+  if (score>=80) return {label:"Very high", icon:"⛔", color:"danger"};
+  if (score>=60) return {label:"High", icon:"▲", color:"danger"};
+  if (score>=30) return {label:"Needs review", icon:"◆", color:"warning"};
+  return {label:"Low", icon:"✓", color:"safe"};
+}
+function gaugeBandChip(score){
+  const m = gaugeBandMeta(score);
+  return `<span class="gauge-band-chip chip-${m.color}" style="background:var(--${m.color}-soft);color:var(--${m.color});">${m.icon} ${esc(m.label)}</span>`;
+}
+
+// One shared tooltip element for every [data-explain] target across the report (annotated
+// transcript highlights, evidence-balance bars, waterfall steps) — hover OR tap shows it,
+// so it works the same on a trackpad and on a phone at 375px.
+let _tipEl = null;
+function ensureTip(){
+  if (_tipEl) return _tipEl;
+  _tipEl = document.createElement("div");
+  _tipEl.className = "tooltip-pop";
+  document.body.appendChild(_tipEl);
+  return _tipEl;
+}
+function showTip(target){
+  const text = target.getAttribute("data-explain");
+  if (!text) return;
+  const tip = ensureTip();
+  tip.textContent = text;
+  tip.classList.add("show");
+  const r = target.getBoundingClientRect();
+  const vw = window.innerWidth, vh = window.innerHeight;
+  tip.style.left = "0px"; tip.style.top = "0px";
+  const tw = Math.min(280, vw - 24), th = tip.offsetHeight || 40;
+  let left = Math.min(Math.max(8, r.left), vw - tw - 8);
+  let top = r.top - th - 8;
+  if (top < 8) top = Math.min(r.bottom + 8, vh - th - 8);
+  tip.style.maxWidth = tw + "px";
+  tip.style.left = left + "px";
+  tip.style.top = top + "px";
+}
+function hideTip(){ if (_tipEl) _tipEl.classList.remove("show"); }
+document.addEventListener("mouseover", e => { const t = e.target.closest("[data-explain]"); if (t) showTip(t); });
+document.addEventListener("mouseout", e => { const t = e.target.closest("[data-explain]"); if (t) hideTip(); });
+document.addEventListener("focusin", e => { const t = e.target.closest("[data-explain]"); if (t) showTip(t); });
+document.addEventListener("focusout", hideTip);
+document.addEventListener("click", e => {
+  const t = e.target.closest("[data-explain]");
+  if (t) { showTip(t); e.stopPropagation(); } else { hideTip(); }
+});
 function naOr(value, formatter){ return (value === null || value === undefined || value === "") ? '<span class="kv-value na">Not available</span>' : `<span class="kv-value">${formatter ? formatter(value) : esc(value)}</span>`; }
 function showToast(msg){
   const el = document.getElementById("toast");
@@ -444,6 +583,7 @@ function buildTabs(d){
   tabs.push({id:"network", label:"Session network"});
   tabs.push({id:"golden", label:"If you already paid"});
   tabs.push({id:"methodology", label:"Methodology"});
+  tabs.push({id:"transparency", label:"Transparency"});
   return tabs;
 }
 
@@ -501,7 +641,7 @@ function renderMain(){
 function renderTabPanel(d){
   const panel = document.getElementById("tabPanel");
   switch(STATE.tab){
-    case "overview": panel.innerHTML = renderOverview(d); break;
+    case "overview": panel.innerHTML = renderOverview(d); wireOverview(d); break;
     case "screenshot": panel.innerHTML = renderScreenshotIntelligence(d); wireOcrOverlay(d); break;
     case "evidence-graph": panel.innerHTML = renderEvidenceGraph(d); wireEvidenceGraph(d); break;
     case "content": panel.innerHTML = renderContent(d); break;
@@ -510,16 +650,137 @@ function renderTabPanel(d){
     case "network": panel.innerHTML = renderNetwork(); wireNetwork(); break;
     case "golden": panel.innerHTML = renderGoldenHour(); break;
     case "methodology": panel.innerHTML = renderMethodology(d); break;
+    case "transparency": panel.innerHTML = renderTransparency(); break;
   }
 }
 
 /* ---------------------------------------------------------------- OVERVIEW (human-readable report) */
 
+const CONTENT_RISK_BUCKET_ORDER = ["financial_claim","urgency_manipulation","credibility","social_signal","url_risk"];
+const VISUAL_INTEGRITY_COLOR = {"likely intact":"safe","possible manipulation":"danger","unable to determine":"info"};
+
+const POLARITY_CLASS = {
+  POSITIVE_RISK: "hl-risk", NEGATED: "hl-negated", CAUTIONARY: "hl-cautionary",
+  PROTECTIVE: "hl-protective", REPORTED_THIRD_PARTY: "hl-reported", NEUTRAL_MENTION: "hl-neutral", UNKNOWN: "hl-neutral",
+};
+
+function buildTranscriptHtml(text, spans, naiveMode){
+  let out = "", cursor = 0;
+  spans.forEach(s => {
+    if (s.start > cursor) out += esc(text.slice(cursor, s.start));
+    const seg = esc(text.slice(s.start, s.end));
+    if (naiveMode){
+      const explain = `A naive keyword matcher only sees the word or phrase "${s.text}" and counts it toward the risk score — it cannot tell a promise from a denial, a warning, or a disclaimer.`;
+      out += `<mark class="hl hl-naive" tabindex="0" data-explain="${escAttr(explain)}">${seg}</mark>`;
+    } else {
+      const cls = POLARITY_CLASS[s.polarity] || "hl-neutral";
+      const tag = s.tag ? `<span class="hl-tag">${esc(s.tag)}</span>` : "";
+      out += `<mark class="hl ${cls}" tabindex="0" data-explain="${escAttr(s.explanation || "")}">${seg}${tag}</mark>`;
+    }
+    cursor = s.end;
+  });
+  if (cursor < text.length) out += esc(text.slice(cursor));
+  return out.replace(/\n/g, "<br>");
+}
+
+/* Prompt 21, part 1 + 2: the annotated transcript is the visual centrepiece of the report —
+   every matched phrase shown inline with its polarity, plus a toggle that re-renders the
+   same text as a naive keyword matcher would have read it (no polarity, no context), so the
+   contribution of the reasoning layer is visible at a glance, not just asserted in prose. */
+function renderAnnotatedTranscript(d){
+  const at = d.annotated_transcript;
+  if (!at || !at.text) return "";
+  const nv = d.naive_vs_checkify || {available:false};
+  const spans = (at.spans || []).slice().sort((a,b) => a.start - b.start);
+  const html = buildTranscriptHtml(at.text, spans, STATE.naiveMode);
+  const diffText = (nv.differenceExplained || []).join(", ") || "no difference to explain";
+  return `<div class="card" style="margin-bottom:16px;" id="annotatedCard">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap;">
+      <div>
+        <h2>Annotated transcript</h2>
+        <div class="card-sub">Every matched phrase, read in the context it actually appeared in — not just pattern-matched.</div>
+      </div>
+      ${nv.available ? `<label class="naive-toggle-row">
+        <input type="checkbox" id="naiveToggle" ${STATE.naiveMode ? "checked" : ""}>
+        Show naive keyword matching instead
+      </label>` : ""}
+    </div>
+    ${nv.available ? `<div class="naive-compare">
+      <div><div class="kv-label">Keyword matching would score</div>
+        <div class="mono kv-value" style="color:var(--danger);">${nv.naiveScore} <span style="font-size:11px;">${esc(nv.naiveBand)}</span></div></div>
+      <div><div class="kv-label">Checkify scores</div>
+        <div class="mono kv-value" style="color:var(--${gaugeBandMeta(nv.checkifyScore).color});">${nv.checkifyScore} <span style="font-size:11px;">${esc(nv.checkifyBand)}</span></div></div>
+      <div style="flex:1;min-width:220px;"><div class="kv-label">Difference explained by</div>
+        <div style="font-size:12.5px;">${esc(diffText)}</div></div>
+    </div>` : ""}
+    <div class="transcript-box" id="annotatedTranscriptBox">${html || '<span style="color:var(--text-dim);">No text was submitted.</span>'}</div>
+    ${STATE.naiveMode ? `<div class="legend"><span class="legend-item"><span class="legend-swatch" style="background:var(--danger)"></span>Every vocabulary hit counted as risk — no polarity, no context</span></div>` : `<div class="legend">
+      <span class="legend-item"><span class="legend-swatch" style="background:var(--danger)"></span>Counted as risk</span>
+      <span class="legend-item"><span class="legend-swatch" style="background:var(--text-dim)"></span>Negated — not counted</span>
+      <span class="legend-item"><span class="legend-swatch" style="background:var(--warning)"></span>Cautionary / warning language</span>
+      <span class="legend-item"><span class="legend-swatch" style="background:var(--safe)"></span>Protective</span>
+      <span class="legend-item"><span class="legend-swatch" style="background:var(--info)"></span>Reported third-party speech</span>
+      <span class="legend-item" style="text-decoration:underline;">Neutral mention</span>
+    </div>`}
+  </div>`;
+}
+
+function wireOverview(d){
+  const toggle = document.getElementById("naiveToggle");
+  if (toggle) toggle.addEventListener("change", () => {
+    STATE.naiveMode = toggle.checked;
+    renderTabPanel(d);
+  });
+  wireEvidenceBalance();
+}
+
+/* Prompt 21, part 3: a two-sided balance — what pushed risk up vs what pushed it down or was
+   checked and found not to matter — sized by weight, not by count, so one HIGH-severity
+   finding visibly outweighs three LOW ones instead of looking equal. */
+function renderEvidenceBalance(d){
+  const eb = d.evidence_balance || {increasing:[], reducing:[], neutral:[]};
+  if (!eb.increasing.length && !eb.reducing.length && !eb.neutral.length) return "";
+  const maxW = Math.max(1, ...eb.increasing.map(x => x.weight), ...eb.reducing.map(x => x.weight));
+  const bar = (item, dir) => {
+    const pct = Math.max(6, Math.round((item.weight / maxW) * 100));
+    const explain = item.evidence ? `${item.label}: ${item.evidence}` : item.label;
+    return `<div class="balance-item">
+      <div class="balance-item-label"><span>${esc(item.label)}</span><span class="mono" style="color:var(--text-dim);">${esc(item.severity || "")}</span></div>
+      <div class="balance-bar-track"><div class="balance-bar ${dir}" style="width:${pct}%;" tabindex="0" data-explain="${escAttr(explain)}"></div></div>
+    </div>`;
+  };
+  const incHtml = eb.increasing.length
+    ? eb.increasing.map(x => bar(x, "up")).join("")
+    : `<div class="balance-empty">No risk-increasing evidence found.</div>`;
+  const redHtml = eb.reducing.length
+    ? eb.reducing.map(x => bar(x, "down")).join("")
+    : `<div class="balance-empty">No protective language found.</div>`;
+  const neutralHtml = eb.neutral.length
+    ? `<div class="balance-neutral-row">${eb.neutral.map(x => `<span class="balance-neutral-chip" tabindex="0" data-explain="${escAttr(x.explanation || x.evidence || "")}">${esc(x.label)}</span>`).join("")}</div>`
+    : `<div class="balance-empty">Nothing observed and dismissed.</div>`;
+  return `<div class="card" style="margin-top:16px;">
+    <h2>Evidence balance</h2>
+    <div class="card-sub">What pushed the score up, what pulled it down, and what was checked but didn't count — sized by weight, not by how many there were.</div>
+    <div class="balance-grid">
+      <div>
+        <div class="balance-col-title">Risk-reducing</div>
+        ${redHtml}
+        <div class="balance-col-title" style="margin-top:16px;">Observed, no risk contribution</div>
+        ${neutralHtml}
+      </div>
+      <div>
+        <div class="balance-col-title">Risk-increasing</div>
+        ${incHtml}
+      </div>
+    </div>
+  </div>`;
+}
+function wireEvidenceBalance(){ /* bars use the global [data-explain] tooltip delegate — nothing to wire */ }
+
 function renderOverview(d){
   const n = d.narrative;
   const bd = d.risk_breakdown;
-  const order = ["financial_claim","urgency_manipulation","credibility","social_signal","url_risk","visual_tampering"];
-  const bars = order.map(key => {
+  const bars = CONTENT_RISK_BUCKET_ORDER.map(key => {
     const b = bd[key];
     const cls = b.available ? "" : "unavailable";
     return `<div class="score-row ${cls}">
@@ -528,16 +789,27 @@ function renderOverview(d){
       <div class="score-num mono" style="color:${b.available ? 'var(--'+bandColor(b.score)+')' : 'var(--text-dim)'}">${b.available ? b.score : "N/A"}</div>
     </div>`;
   }).join("");
+  const vi = d.visual_integrity;
+  const viColor = VISUAL_INTEGRITY_COLOR[vi.state] || "info";
 
   const topFindings = d.explanations.slice(0, 5).map(f => renderFindingCard(f)).join("");
 
-  return `<div class="grid-2">
+  const protective = d.protective_evidence || [];
+  const dismissed = d.dismissed_evidence || [];
+
+  return `${renderAnnotatedTranscript(d)}
+  <div class="grid-2">
     <div class="card">
       <h2>Overall assessment</h2>
       <div class="card-sub">Generated from the actual evidence in this submission — not a template.</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;">
+        <span class="chip chip-neutral" style="text-transform:none;">${esc((d.content_type||"UNKNOWN").replace(/_/g," "))}</span>
+        ${d.auto_critical ? `<span class="chip chip-danger">Auto-critical: ${esc(d.auto_critical_reasons[0]||"")}</span>` : ""}
+      </div>
+      ${d.protective_note ? `<div class="banner">⚠ ${esc(d.protective_note)}</div>` : ""}
       ${n.aiAssessment ? `<div class="methodology-block" style="border-left:3px solid #8a5fd6;margin-bottom:16px;">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
-          <span class="chip" style="background:rgba(150,110,220,.16);color:#8a5fd6;">AI second opinion</span>
+          <span class="chip" style="background:rgba(150,110,220,.16);color:#8a5fd6;">AI content read — informational, not scored</span>
           <span style="font-size:11px;color:var(--text-dim);">${esc(d.ai_analysis.model)} via Groq</span>
         </div>
         <div style="font-size:13px;line-height:1.6;">${esc(n.aiAssessment)}</div>
@@ -551,6 +823,8 @@ function renderOverview(d){
         }).join("")}</div>` : ""}
         <h3>Why this matters</h3>
         <p>${esc(n.whyItMatters)}</p>
+        ${protective.length ? `<h3>Protective language found</h3><ul>${protective.map(p => `<li><b>${esc(p.label)}:</b> "${esc(p.evidence)}"</li>`).join("")}</ul>` : ""}
+        ${dismissed.length ? `<h3>Checked and not counted</h3><ul>${dismissed.map(x => `<li><b>${esc(x.signal)}</b> — ${esc(x.evidence)}: ${esc(x.explanation)}</li>`).join("")}</ul>` : ""}
         <h3>Recommended action</h3>
         <ul>${n.recommendedAction.map(x => `<li>${esc(x)}</li>`).join("")}</ul>
         ${d.limitations.length ? `<h3>Limitations of this analysis</h3><ul>${d.limitations.map(x => `<li>${esc(x)}</li>`).join("")}</ul>` : ""}
@@ -558,9 +832,14 @@ function renderOverview(d){
     </div>
     <div>
       <div class="card" style="margin-bottom:16px;">
-        <h2>Risk breakdown</h2>
+        <h2>Content risk breakdown</h2>
         <div class="card-sub">Explainable sub-scores that combine into the overall score — see Methodology for the exact formula.</div>
         ${bars}
+      </div>
+      <div class="card" style="margin-bottom:16px;">
+        <h2>Visual integrity</h2>
+        <div class="card-sub">Reported separately from content risk — never blended into the score above.</div>
+        <span class="chip chip-${viColor}" style="text-transform:none;">${esc(vi.state)}</span>
       </div>
       <div class="card">
         <h2>Top evidence</h2>
@@ -568,7 +847,8 @@ function renderOverview(d){
         ${topFindings || '<div class="card-sub">No significant risk signals found.</div>'}
       </div>
     </div>
-  </div>`;
+  </div>
+  ${renderEvidenceBalance(d)}`;
 }
 
 function renderFindingCard(f){
@@ -587,7 +867,7 @@ function renderFindingCard(f){
 
 /* ---------------------------------------------------------------- EVIDENCE GRAPH */
 
-const EVIDENCE_BUCKET_ORDER = ["financial_claim","urgency_manipulation","credibility","social_signal","url_risk","visual_tampering"];
+const EVIDENCE_BUCKET_ORDER = CONTENT_RISK_BUCKET_ORDER;
 
 function renderEvidenceGraph(d){
   const bd = d.risk_breakdown;
@@ -706,9 +986,10 @@ function renderScreenshotIntelligence(d){
       </div>
       <div class="card">
         <h2>Visual integrity</h2>
+        <div class="card-sub">A separate axis from content risk (Part H) — this never changes the fraud risk score above.</div>
+        <span class="chip chip-${VISUAL_INTEGRITY_COLOR[d.visual_integrity.state]||'info'}" style="text-transform:none;margin-bottom:10px;display:inline-block;">${esc(d.visual_integrity.state)}</span>
         ${ela.available ? `
-          <div class="chip chip-${ela.tamperScore>=55?'danger':ela.tamperScore>=25?'warning':'safe'}" style="margin-bottom:10px;">${ela.tamperScore}/100 tamper score</div>
-          <div class="card-sub" style="margin-bottom:10px;">${esc(ela.verdict)}</div>
+          <div class="card-sub" style="margin:8px 0;">Tamper score: <b class="mono">${ela.tamperScore}/100</b> — ${esc(ela.verdict)}</div>
           <img src="${ela.elaPreview}" style="width:100%;border-radius:8px;border:1px solid var(--border);" alt="ELA residual map" />
           <div class="card-sub" style="margin-top:10px;">Error Level Analysis is a heuristic signal (see Limitations on the Overview tab) — treat as a lead to investigate, not standalone proof.</div>
         ` : `<div class="card-sub">${esc(ela.reason || "Not available.")}</div>`}
@@ -971,6 +1252,57 @@ function renderMethodology(d){
       <b>AI-assisted semantic analysis (Groq):</b> alongside the regex/lexicon engine, every text submission is also sent to an LLM (${d.ai_analysis && d.ai_analysis.model ? esc(d.ai_analysis.model) : 'openai/gpt-oss-120b'} via Groq) prompted specifically to catch paraphrased or unusually-worded scam language that fixed patterns miss — e.g. "10x for sure" or "my uncle at the exchange says" rather than only literal phrases like "guaranteed" or "act now". Each risk bucket takes the <i>higher</i> of the rule-based score and the LLM's finding in that category — never added on top — so the two systems corroborate rather than double-count. If the API key is missing, the request fails, or the response can't be parsed, analysis proceeds on rule-based signals alone; this is disclosed per-analysis in Limitations, never silently hidden.
     </div>
     <div class="card-sub" style="margin-top:10px;"><b>What "Not available" means:</b> a signal is shown as Not available when the underlying check could not be performed (e.g. WHOIS lookup failed, domain doesn't resolve, OCR engine unavailable) — it is never silently replaced with a guessed or fabricated value.</div>
+  </div>`;
+}
+
+/* Prompt 22, item 3: every check, its data source, its snapshot date, its known failure
+   modes, and the measured false-positive rate — including the bad numbers. This page does
+   not depend on the current analysis (d) on purpose: it should read the same whether or not
+   anything has been submitted yet. */
+const TRANSPARENCY_CHECKS = [
+  {name: "Text polarity / negation (spaCy)", source: "spaCy en_core_web_sm dependency parser, run locally", snapshot: "Model pinned at en_core_web_sm 3.8.0",
+   failure: "Falls back to a fixed-window regex heuristic if the model fails to load — degrades precision on reported speech and cautionary framing, not just negation. Complex multi-clause sentences occasionally parse into the wrong ancestor chain."},
+  {name: "Financial-claim / urgency / credibility patterns", source: "Hand-written regex library, this repo", snapshot: "Last edited with this build — see git history",
+   failure: "Only covers English-language patterns common in Indian retail-investor scams. Novel phrasing outside the pattern set is invisible to the rule engine (the AI layer is the only backstop for that, and it cannot raise the score)."},
+  {name: "SEBI registration format check", source: "Illustrative ~5-entry dataset in this repo, not SEBI's live registry", snapshot: "Static since this build — not refreshed from any live feed",
+   failure: "Confirms format and a small allow-list match only. A number that is well-formed but not on SEBI's real ~1,300-entry registry will show CLAIMED, not VERIFIED_MISMATCH, unless it happens to collide with the illustrative list."},
+  {name: "WHOIS domain age", source: "Live WHOIS queries (IANA → registry → registrar referral chain) over raw sockets", snapshot: "Queried live at analysis time, not cached",
+   failure: "Some registries rate-limit or block automated WHOIS queries; some ccTLDs (including parts of .in) return incomplete records. Shown as Not available rather than guessed when a query fails."},
+  {name: "TLS certificate inspection", source: "Live TLS handshake to the domain, this machine", snapshot: "Queried live at analysis time",
+   failure: "Networks with a TLS-inspecting proxy (some antivirus/corporate wifi) break strict verification; the code retries unverified and reports that plainly, but the reported issuer may then be the interceptor's, not the site's."},
+  {name: "Telegram / Instagram public preview", source: "Live scrape of t.me/s/&lt;channel&gt; and instagram.com/&lt;handle&gt;, public pages only", snapshot: "Fetched live at analysis time",
+   failure: "Instagram has required login for most profile data since ~2020 — follower/post counts are usually unavailable. Private or preview-disabled Telegram channels return nothing. Neither platform is queried in DEMO_MODE."},
+  {name: "OCR text extraction", source: "Tesseract OCR, installed locally", snapshot: "Whatever Tesseract version is installed on the host — not pinned by this repo",
+   failure: "Accuracy drops on low-resolution, low-contrast, or heavily stylized screenshots. Confidence is reported and surfaced in the UI; low-confidence extractions are flagged, not silently trusted."},
+  {name: "Error Level Analysis (visual tampering)", source: "PIL + numpy recompression-residual heuristic, this repo", snapshot: "Static algorithm, no external data",
+   failure: "Reads elevated on legitimately recompressed images (e.g. an image forwarded through WhatsApp many times) as often as on genuinely edited ones. This is exactly why it is reported on its own axis and never blended into the fraud-risk score."},
+  {name: "AI content classification (Groq)", source: "openai/gpt-oss-120b via the Groq API", snapshot: "Model string pinned in GROQ_MODEL; provider-side weights can change without our control",
+   failure: "Never sees the scoring path (R2) — it can only classify content type and add commentary. Disabled entirely offline / in DEMO_MODE. Its own read of a message is a second opinion, not a verified fact."},
+];
+
+function renderTransparency(){
+  const rows = TRANSPARENCY_CHECKS.map(c => `<tr>
+    <td style="font-weight:600;">${esc(c.name)}</td>
+    <td>${c.source}</td>
+    <td class="mono" style="white-space:nowrap;">${esc(c.snapshot)}</td>
+    <td>${c.failure}</td>
+  </tr>`).join("");
+  return `<div class="card">
+    <h2>Transparency</h2>
+    <div class="card-sub">Every check this tool runs, where its data comes from, and where it is known to go wrong — published on purpose, including the numbers that don't flatter us.</div>
+    <div style="overflow-x:auto;">
+      <table style="width:100%;border-collapse:collapse;font-size:12.3px;">
+        <thead><tr style="text-align:left;color:var(--text-dim);font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;">
+          <th style="padding:6px 10px 6px 0;">Check</th><th style="padding:6px 10px;">Data source</th><th style="padding:6px 10px;">Snapshot / version</th><th style="padding:6px 0 6px 10px;">Known failure modes</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+    <div class="methodology-block" style="margin-top:16px;border-left:3px solid var(--warning);">
+      <b>Measured false-positive rate — stated plainly</b>
+      <p style="margin:8px 0 0;">The only measured numbers we have are 17/17 assertions passing in <code class="mono">test_checkify.py</code>, an 11-case suite we wrote ourselves, weighted toward the exact adversarial patterns (negation, cautionary framing, reported speech, disclaimer-plus-scam, prompt injection) this build was built to fix. That is a regression suite, not an unbiased false-positive rate on real-world traffic — we have not run this against a large, independently labeled corpus of genuine financial messages, and we are not claiming a false-positive percentage we haven't actually measured. Anyone evaluating this for deployment should treat "0 known false positives in our own adversarial tests" and "measured false-positive rate on real traffic" as two different, unequal claims — and we are only making the first one.</p>
+    </div>
+    <div class="card-sub" style="margin-top:14px;">See also: <b>Methodology</b> for the scoring formula, and the <b>Overview</b> tab's "Checked and not counted" / "Protective language found" sections for what this specific analysis dismissed and why.</div>
   </div>`;
 }
 
