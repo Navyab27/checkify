@@ -11,6 +11,8 @@ Every signal is computed live: real WHOIS lookups, real TLS handshakes, real Tel
 - **Telegram/Instagram** — scrapes public channel previews for subscriber counts, recent messages, and bot-inflated-audience detection (subscribers vs. actual engagement).
 - **Screenshot analysis** — upload a promotional image or scam banner and it's OCR'd automatically (Tesseract) — no need to retype the text. Extracts financial claims, contact handles, URLs, and runs Error Level Analysis (ELA) for visual tampering signs.
 - **Explainable scoring** — six risk buckets (financial claim, urgency/manipulation, credibility, social signal, URL, visual tampering) fused into an overall score with a documented formula, not a black box.
+- **AI-assisted semantic analysis (optional)** — if a Groq API key is configured, an LLM runs alongside the regex engine as a second opinion, catching paraphrased or unusually-worded scam language (e.g. "10x for sure" or "my uncle at the exchange says") that fixed patterns miss. Each risk bucket takes the *higher* of the rule-based and AI-derived score, never both added together, and every AI-derived finding is visibly tagged as AI-assisted, not a verified fact. Works fully without it — the app just runs on rule-based signals alone.
+- **Evidence graph** — a visual node graph showing submission → risk category → individual finding for the current analysis, so the reasoning behind a verdict is inspectable, not just a number.
 - **Human-readable report** — a narrative "why this was flagged / what the evidence shows / why it matters / recommended action" summary generated from the actual findings, plus a ready-to-file cybercrime.gov.in complaint draft.
 
 ## Setup
@@ -31,7 +33,17 @@ If Tesseract isn't installed, everything else still works — screenshot uploads
 pip install -r requirements.txt
 ```
 
-### 3. Run
+### 3. (Optional) Enable AI-assisted analysis
+
+```bash
+cd checkify
+cp .env.example .env
+# edit .env and set GROQ_API_KEY to your own key from console.groq.com
+```
+
+Without this, Checkify runs fine on rule-based analysis alone — the AI layer is a corroborating second opinion, not a requirement.
+
+### 4. Run
 
 ```bash
 cd checkify
@@ -46,6 +58,7 @@ Open **http://localhost:5000** in your browser. It must be opened through this U
 checkify/
   server.py           Flask backend — all analysis logic
   static/index.html   Frontend (vanilla HTML/JS, no build step)
+  .env.example        Template for the optional GROQ_API_KEY (copy to .env)
 checkify-dashboard.html   Standalone offline demo with 3 illustrative cases
                           (no backend needed — useful as a fallback if you
                           can't run the live server during a demo)
@@ -54,7 +67,7 @@ checkify-dashboard.html   Standalone offline demo with 3 illustrative cases
 ## Known limitations
 
 - No live connection to SEBI's real intermediary registry — advisor/registration checks run against a small illustrative dataset (~5 names), not the real ~1,300-entry list.
-- No vision-capable AI model is wired in — image understanding is real OCR text extraction plus rule-based analysis, not deep visual/contextual model reasoning.
+- No vision-capable AI model is wired in — image understanding is real OCR text extraction plus rule-based and AI-assisted *text* analysis, not deep visual/contextual model reasoning on the image itself.
 - No threat-intelligence API (VirusTotal, Google Safe Browsing) is connected — link risk uses structural heuristics (domain age, TLDs, redirects, homoglyphs) instead.
 - ELA (tamper detection) is a statistical heuristic — it can read elevated on some untampered images (e.g. images recompressed many times over WhatsApp), so it's weighted accordingly in the overall score rather than treated as proof.
 - Session history and the correlation graph are in-memory only and reset when the server restarts.

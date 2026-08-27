@@ -14,6 +14,8 @@ Open: http://localhost:5000
 import base64
 import io
 import ipaddress
+import json
+import os
 import re
 import socket
 import ssl
@@ -23,17 +25,20 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
+import httpx
 import numpy as np
 import requests
 import urllib3
 from bs4 import BeautifulSoup
 from cryptography import x509
 from cryptography.x509.oid import NameOID
+from dotenv import load_dotenv
 from flask import Flask, jsonify, request, send_from_directory
+from groq import Groq
 from PIL import Image, ImageChops, ImageDraw
 from rapidfuzz import fuzz
 
-import os
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 
 OCR_AVAILABLE = False
 OCR_UNAVAILABLE_REASON = None
@@ -58,6 +63,29 @@ except Exception as e:
 # check_ssl/fetch_page) so a link can still be analyzed on networks with TLS-inspecting
 # proxies/antivirus — the resulting warning on every such request is expected, not a bug.
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
+GROQ_AVAILABLE = False
+GROQ_UNAVAILABLE_REASON = None
+groq_client = None
+if not GROQ_API_KEY:
+    GROQ_UNAVAILABLE_REASON = "No GROQ_API_KEY configured — set it in checkify/.env to enable AI-assisted analysis."
+else:
+    try:
+        groq_client = Groq(api_key=GROQ_API_KEY, timeout=12.0)
+        groq_client.models.list()
+        GROQ_AVAILABLE = True
+    except Exception:
+        # Same TLS-inspecting-proxy/antivirus situation handled elsewhere in this file
+        # (see check_ssl) can also break the Groq SDK's own verified HTTPS connection.
+        try:
+            groq_client = Groq(api_key=GROQ_API_KEY, timeout=12.0, http_client=httpx.Client(verify=False, timeout=12.0))
+            groq_client.models.list()
+            GROQ_AVAILABLE = True
+        except Exception as e2:
+            groq_client = None
+            GROQ_UNAVAILABLE_REASON = f"Could not reach Groq API: {e2}"
 
 app = Flask(__name__, static_folder="static", static_url_path="")
 
@@ -180,27 +208,34 @@ def match_advisor_name(text):
 
 CONTENT_PATTERNS = [
     ("guaranteed_return", 22, [
-        r"\bguarantee[ds]?\b", r"\b100\s?%\s*(safe|sure|guaranteed)\b", r"\brisk[- ]?free\b",
-        r"\bno\s+loss\b", r"\bsure[- ]?shot\b", r"\bfixed\s+returns?\b", r"\bcertain\s+profit\b",
+        r"\bguarantee[ds]?\b", r"\bguaranteed\b", r"\b100\s?%\s*(safe|sure|guaranteed)\b", r"\brisk[- ]?free\b",
+        r"\bno\s+loss\b", r"\bno\s+risk\b", r"\bsure[- ]?shot\b", r"\bfixed\s+returns?\b", r"\bcertain\s+profit\b",
+        r"\bassured\s+returns?\b", r"\bconfirmed\s+profit\b", r"\bzero\s+risk\b",
     ]),
     ("urgency", 12, [
-        r"\bact\s+now\b", r"\btoday\s+only\b", r"\blimited\s+(time|slots?|seats?)\b",
-        r"\bhurry\b", r"\bclosing\s+soon\b", r"\blast\s+chance\b", r"\bdon.?t\s+wait\b",
-        r"\bexpires?\s+(today|tonight|soon)\b",
+        r"\bact\s+(now|fast|immediately|quickly|today)\b", r"\btoday\s+only\b", r"\blimited\s+(time|slots?|seats?|period|offer)\b",
+        r"\bhurry(\s+up)?\b", r"\bclosing\s+soon\b", r"\blast\s+chance\b", r"\bdon.?t\s+(wait|delay)\b",
+        r"\bexpires?\s+(today|tonight|soon)\b", r"\btime\s+is\s+running\s+out\b", r"\bbook\s+now\b",
+        r"\bgrab\s+(this\s+)?now\b", r"\bhurry\s+before\b", r"\bwithin\s+\d{1,3}\s+(hours?|minutes?)\b",
+        r"\brespond\s+immediately\b", r"\bimmediate\s+action\b", r"\bquick(ly)?\s+decision\b",
     ]),
     ("fomo", 10, [
         r"\bdon.?t\s+miss\b", r"\bexclusive\b", r"\bselected\s+few\b",
         r"\bbefore\s+it.?s\s+too\s+late\b", r"\bonce[- ]in[- ]a[- ]lifetime\b",
-        r"\bonly\s+\d{1,3}\s+(slots?|seats?|spots?)\s+left\b",
+        r"\bonly\s+\d{1,3}\s+(slots?|seats?|spots?)\s+left\b", r"\bfew\s+(slots?|seats?|spots?)\s+(left|remaining)\b",
+        r"\bnot\s+everyone\s+gets\s+this\b", r"\bfor\s+serious\s+investors\s+only\b",
     ]),
     ("authority_claim", 16, [
         r"\bsebi[- ]?(registered|approved|certified)\b", r"\bcertified\s+analyst\b",
-        r"\binsider\s+(info|tip|information)\b",
+        r"\binsider\s+(info|tip|information)\b", r"\bgovernment\s+approved\b", r"\brbi\s+approved\b",
+        r"\blicensed\s+(broker|advisor|adviser)\b",
     ]),
     ("payment_solicitation", 14, [
         r"\bupi\b", r"[\w.\-]+@(?:ok\w{2,6}|ybl|paytm|apl|ibl)\b",
         r"\bjoin\s+(?:our\s+)?(?:vip|premium|paid)\s+group\b", r"\bsubscription\s+fee\b",
-        r"\bpay\s+(?:rs\.?|₹|inr)\s?\d+",
+        r"\bpay\s+(?:rs\.?|₹|inr)\s?\d+", r"\bpay\s+(now|immediately|to\s+join|to\s+start)\b",
+        r"\b(send|transfer|deposit)\s+(money|funds|payment|amount)\b", r"\bmake\s+(a\s+)?payment\s+(now|today|to)\b",
+        r"\bactivation\s+fee\b", r"\bregistration\s+fee\b", r"\bprocessing\s+fee\b",
     ]),
 ]
 
@@ -243,7 +278,7 @@ def is_negated(text, start):
 
 
 REG_NUMBER_RE = re.compile(r"\b(IN[HAZPM])\s?[- ]?(\d{6,12})\b", re.I)
-PCT_RE = re.compile(r"(\d{1,4})\s?%")
+PCT_RE = re.compile(r"(\d{1,4})\s?(?:%|percent\b|per\s?cent\b|pct\b)", re.I)
 PROFIT_WORD_RE = re.compile(r"\b(returns?|profit|gains?|increase|double|triple|multibagger|jackpot)\b", re.I)
 UPI_RE = re.compile(r"[\w.\-]+@(?:ok\w{2,6}|ybl|paytm|apl|ibl)\b", re.I)
 UTR_RE = re.compile(r"\b\d{12}\b")
@@ -446,6 +481,75 @@ def extract_rich_entities(text):
         "currencyAmounts": currency, "telegramUsernames": sorted(tg_from_url),
         "instagramUsernames": sorted(ig_from_url), "whatsappNumbers": wa_numbers,
     }
+
+
+# --------------------------------------------------------------------------- AI-assisted semantic analysis (Groq)
+
+LLM_BUCKETS = {"financial_claim", "urgency_manipulation", "credibility", "social_signal"}
+LLM_SEVERITY_SCORE = {"HIGH": 38, "MEDIUM": 22, "LOW": 10}
+
+LLM_SYSTEM_PROMPT = """You are a financial-fraud analyst reviewing a single message, screenshot caption, or promotional text for investment-scam signals. You are a second, independent check alongside a separate rule-based system — your job is to catch real scam intent that rigid keyword matching misses (paraphrases, unusual phrasing, implied urgency, disguised payment requests), not to repeat obvious keyword hits.
+
+Judge the ACTUAL text given. Do not assume something is a scam just because it mentions investing, stocks, or returns — hedged, factual, or disclaimer-laden financial text is legitimate. Only flag genuine manipulation, unrealistic promises, or fraud indicators.
+
+Respond with ONLY a JSON object, no other text, matching exactly:
+{
+  "is_scam_language": boolean,
+  "confidence": integer 0-100,
+  "signals": [
+    {"category": "financial_claim" | "urgency_manipulation" | "credibility" | "social_signal",
+     "signal": short label (max 6 words),
+     "severity": "HIGH" | "MEDIUM" | "LOW",
+     "quote": short exact or close quote from the text supporting this,
+     "why": one sentence on why this matters}
+  ],
+  "summary": one or two plain-English sentences giving your overall read of this specific text
+}
+If nothing suspicious is found, return an empty signals array and is_scam_language: false."""
+
+
+def llm_analyze_text(text):
+    """Groq-hosted LLM as a semantic second opinion alongside the regex/lexicon engine
+    above. The rule-based system is the guaranteed baseline — if this call fails for any
+    reason (no key, network, rate limit, malformed response), analysis proceeds on the
+    rule-based signals alone rather than failing the whole request. Findings from here are
+    tagged AI_ASSESSED (not OBSERVED) so the UI never presents model inference as a
+    verified regex match, and the model name actually used is always disclosed."""
+    if not GROQ_AVAILABLE or not text or not text.strip():
+        return {"available": False, "reason": GROQ_UNAVAILABLE_REASON if not GROQ_AVAILABLE else "No text to analyze."}
+    try:
+        resp = groq_client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[{"role": "system", "content": LLM_SYSTEM_PROMPT}, {"role": "user", "content": text[:6000]}],
+            temperature=0.2,
+            response_format={"type": "json_object"},
+            timeout=12.0,
+        )
+        parsed = json.loads(resp.choices[0].message.content)
+        signals = []
+        for s in parsed.get("signals", []):
+            category = s.get("category")
+            if category not in LLM_BUCKETS:
+                continue
+            severity = s.get("severity") if s.get("severity") in LLM_SEVERITY_SCORE else "MEDIUM"
+            signals.append({
+                "signal": str(s.get("signal", "AI-flagged signal"))[:80],
+                "severity": severity,
+                "evidence": str(s.get("quote", ""))[:200],
+                "why": str(s.get("why", ""))[:300],
+                "category": category,
+                "status": "AI_ASSESSED",
+            })
+        return {
+            "available": True,
+            "model": GROQ_MODEL,
+            "isScamLanguage": bool(parsed.get("is_scam_language")),
+            "confidence": max(0, min(100, int(parsed.get("confidence", 0)))),
+            "summary": str(parsed.get("summary", ""))[:500],
+            "signals": signals,
+        }
+    except Exception as e:
+        return {"available": False, "reason": f"Groq request failed: {e}"}
 
 
 # --------------------------------------------------------------------------- text scoring
@@ -1275,7 +1379,7 @@ def build_contact_info(entities):
     }
 
 
-def build_narrative(score, label, confidence, findings, content, link, ela, entities, financial_claims, contact_info):
+def build_narrative(score, label, confidence, findings, content, link, ela, entities, financial_claims, contact_info, llm=None):
     ranked = sorted(findings, key=lambda f: SEV_RANK.get(f["severity"], 1))
 
     why_flagged = []
@@ -1346,6 +1450,7 @@ def build_narrative(score, label, confidence, findings, content, link, ela, enti
         "evidence": evidence_facts,
         "whyItMatters": why_matters,
         "recommendedAction": recommended,
+        "aiAssessment": (llm.get("summary") or None) if llm and llm.get("available") else None,
     }
 
 
@@ -1390,7 +1495,13 @@ def api_analyze():
         auto_detected_url = True
 
     content = score_text(combined_text) if combined_text else {"available": False}
-    link = analyze_link(effective_url) if effective_url else {"available": False}
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        link_future = pool.submit(analyze_link, effective_url) if effective_url else None
+        llm_future = pool.submit(llm_analyze_text, combined_text) if combined_text else None
+        link = link_future.result() if link_future else {"available": False}
+        llm = llm_future.result() if llm_future else {"available": False, "reason": "No text to analyze."}
+
     try:
         ela = error_level_analysis(image_bytes) if image_bytes else None
         ela_error = None
@@ -1403,15 +1514,26 @@ def api_analyze():
     ))
     social = compute_social_signal_risk(entities, link.get("telegram") if link.get("available") else None, has_payment_solicitation)
 
+    # The LLM is a semantic second opinion, not a second vote to add on top of the regex
+    # score — each bucket takes the MAX of its rule-based score and the LLM's highest-
+    # severity finding in that category, so a paraphrase the regex engine missed can still
+    # surface the real risk, without double-counting when both systems agree.
+    llm_bucket_peak = {b: 0 for b in LLM_BUCKETS}
+    if llm.get("available"):
+        for s in llm.get("signals", []):
+            llm_bucket_peak[s["category"]] = max(llm_bucket_peak[s["category"]], LLM_SEVERITY_SCORE.get(s["severity"], 20))
+
     buckets = {
-        "financial_claim": {"score": content.get("subScores", {}).get("financial_claim", 0), "available": content.get("available", False)},
-        "urgency_manipulation": {"score": content.get("subScores", {}).get("urgency_manipulation", 0), "available": content.get("available", False)},
-        "credibility": {"score": content.get("subScores", {}).get("credibility", 0), "available": content.get("available", False)},
-        "social_signal": {"score": social["score"], "available": social["available"]},
+        "financial_claim": {"score": max(content.get("subScores", {}).get("financial_claim", 0), llm_bucket_peak["financial_claim"]), "available": content.get("available", False) or llm.get("available", False)},
+        "urgency_manipulation": {"score": max(content.get("subScores", {}).get("urgency_manipulation", 0), llm_bucket_peak["urgency_manipulation"]), "available": content.get("available", False) or llm.get("available", False)},
+        "credibility": {"score": max(content.get("subScores", {}).get("credibility", 0), llm_bucket_peak["credibility"]), "available": content.get("available", False) or llm.get("available", False)},
+        "social_signal": {"score": max(social["score"], llm_bucket_peak["social_signal"]), "available": social["available"] or llm.get("available", False)},
         "url_risk": {"score": link.get("score", 0), "available": bool(link.get("available") and not link.get("blocked"))},
         "visual_tampering": {"score": ela["tamperScore"] if ela else 0, "available": ela is not None},
     }
     overall_score, confidence = fuse_all(buckets)
+    if llm.get("available"):
+        confidence = min(confidence + 4, 97)
     verdict = verdict_for(overall_score)
     v_label = verdict_label_for(overall_score)
 
@@ -1423,16 +1545,22 @@ def api_analyze():
     all_findings.extend(social["findings"])
     if ela:
         all_findings.append(ela_to_finding(ela))
+    if llm.get("available"):
+        all_findings.extend(llm.get("signals", []))
     all_findings.sort(key=lambda f: SEV_RANK.get(f["severity"], 1))
 
     financial_claims = build_financial_claims(content)
     contact_info = build_contact_info(entities)
-    narrative = build_narrative(overall_score, v_label, confidence, all_findings, content, link, ela, entities, financial_claims, contact_info)
+    narrative = build_narrative(overall_score, v_label, confidence, all_findings, content, link, ela, entities, financial_claims, contact_info, llm)
 
     limitations = [
         "No live connection to SEBI's registry — registration-number and advisor-name checks are format/fuzzy-match against a small illustrative dataset, not the real ~1,300-entry registry.",
-        "No vision-capable AI model is configured in this build — image understanding is real OCR text extraction plus rule-based analysis, not deep visual/contextual model reasoning.",
+        "No vision-capable AI model is configured in this build — image understanding is real OCR text extraction plus rule-based and AI-assisted text analysis, not deep visual/contextual model reasoning.",
     ]
+    if llm.get("available"):
+        limitations.append(f"Text analysis is corroborated by an AI language model ({llm['model']} via Groq) alongside rule-based pattern matching — model reasoning is a second opinion, not an independently verified fact.")
+    elif combined_text:
+        limitations.append(f"AI-assisted semantic analysis was unavailable for this request ({llm.get('reason', 'unknown reason')}) — results rely on rule-based pattern matching only.")
     if image_bytes and not (ocr and ocr.get("available")):
         limitations.append(f"OCR could not run: {(ocr or {}).get('reason', 'unknown error')}.")
     if ocr and ocr.get("available") and ocr.get("lowConfidence"):
@@ -1478,6 +1606,7 @@ def api_analyze():
         "visual_tampering": ela or {"available": False, "reason": "No image was submitted." if not image_bytes else (ela_error or "Unavailable")},
         "url_analysis": link,
         "social_analysis": social,
+        "ai_analysis": llm,
 
         "recommendations": narrative["recommendedAction"],
         "limitations": limitations,

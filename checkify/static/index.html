@@ -212,7 +212,7 @@ if (location.protocol !== "http:" && location.protocol !== "https:") {
       <div><div class="brand-name">Checkify</div><div class="brand-sub">Multimodal fraud analysis</div></div>
     </div>
     <span class="live-tag"><span class="live-dot"></span>Connected to local backend — OCR / WHOIS / SSL / scrape</span>
-    <span style="font-size:10px;color:var(--text-dim);">build 2026-08-27.3 · <span id="apiBaseIndicator"></span></span>
+    <span style="font-size:10px;color:var(--text-dim);">build 2026-08-27.4 · <span id="apiBaseIndicator"></span></span>
 
     <form id="analyzeForm">
       <div class="form-group">
@@ -437,6 +437,7 @@ function buildTabs(d){
     {id:"overview", label:"Overview"},
   ];
   if (d.input.hasImage) tabs.push({id:"screenshot", label:"Screenshot Intelligence"});
+  tabs.push({id:"evidence-graph", label:"Evidence Graph"});
   tabs.push({id:"content", label:"Content & language"});
   tabs.push({id:"link", label:"Link & domain"});
   tabs.push({id:"social", label:"Telegram / Instagram"});
@@ -502,6 +503,7 @@ function renderTabPanel(d){
   switch(STATE.tab){
     case "overview": panel.innerHTML = renderOverview(d); break;
     case "screenshot": panel.innerHTML = renderScreenshotIntelligence(d); wireOcrOverlay(d); break;
+    case "evidence-graph": panel.innerHTML = renderEvidenceGraph(d); wireEvidenceGraph(d); break;
     case "content": panel.innerHTML = renderContent(d); break;
     case "link": panel.innerHTML = renderLink(d); break;
     case "social": panel.innerHTML = renderSocial(d); break;
@@ -533,6 +535,13 @@ function renderOverview(d){
     <div class="card">
       <h2>Overall assessment</h2>
       <div class="card-sub">Generated from the actual evidence in this submission — not a template.</div>
+      ${n.aiAssessment ? `<div class="methodology-block" style="border-left:3px solid #8a5fd6;margin-bottom:16px;">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+          <span class="chip" style="background:rgba(150,110,220,.16);color:#8a5fd6;">AI second opinion</span>
+          <span style="font-size:11px;color:var(--text-dim);">${esc(d.ai_analysis.model)} via Groq</span>
+        </div>
+        <div style="font-size:13px;line-height:1.6;">${esc(n.aiAssessment)}</div>
+      </div>` : ""}
       <div class="narrative">
         <h3>Why this was flagged</h3>
         <ul>${n.whyFlagged.map(x => `<li>${esc(x)}</li>`).join("")}</ul>
@@ -564,15 +573,84 @@ function renderOverview(d){
 
 function renderFindingCard(f){
   const color = sevColor(f.severity);
+  const isAi = f.status === "AI_ASSESSED";
   return `<div class="finding-card" style="border-left:3px solid var(--${color});">
     <div class="finding-head">
-      <span class="finding-signal">${esc(f.signal)}</span>
+      <span class="finding-signal">${esc(f.signal)} ${isAi ? '<span class="chip" style="background:rgba(150,110,220,.16);color:#8a5fd6;">AI</span>' : ''}</span>
       <span class="chip chip-${color}">${esc(f.severity)}</span>
     </div>
     ${f.evidence ? `<div class="finding-evidence">${esc(f.evidence)}</div>` : ""}
     ${f.why ? `<div class="finding-why">${esc(f.why)}</div>` : ""}
-    <div class="finding-status">${esc(f.status || "OBSERVED")}</div>
+    <div class="finding-status">${isAi ? "AI-ASSESSED (Groq language model — a second opinion, not an exact pattern match)" : esc(f.status || "OBSERVED")}</div>
   </div>`;
+}
+
+/* ---------------------------------------------------------------- EVIDENCE GRAPH */
+
+const EVIDENCE_BUCKET_ORDER = ["financial_claim","urgency_manipulation","credibility","social_signal","url_risk","visual_tampering"];
+
+function renderEvidenceGraph(d){
+  const bd = d.risk_breakdown;
+  const available = EVIDENCE_BUCKET_ORDER.filter(k => bd[k].available);
+  if (!available.length) {
+    return `<div class="card"><div class="empty-state" style="padding:30px;"><h2 style="font-size:15px;">No evidence graph yet</h2><p>Run an analysis with at least one available signal to see how the verdict was reached.</p></div></div>`;
+  }
+  return `<div class="card">
+    <h2>Evidence graph</h2>
+    <div class="card-sub">How this verdict was reached: submission → risk category → individual finding. Hover a node for detail.</div>
+    <div class="network-svg-holder" style="padding:10px;">
+      <svg id="evidenceSvg" viewBox="0 0 640 460" width="100%" height="460"></svg>
+    </div>
+    <div class="net-legend">
+      <span class="net-legend-item"><span class="net-legend-swatch" style="background:var(--danger)"></span>High severity</span>
+      <span class="net-legend-item"><span class="net-legend-swatch" style="background:var(--warning)"></span>Medium severity</span>
+      <span class="net-legend-item"><span class="net-legend-swatch" style="background:var(--info)"></span>Low severity</span>
+      <span class="net-legend-item">Dashed outline = AI-assisted (Groq) · Solid outline = rule-based match</span>
+    </div>
+  </div>`;
+}
+
+function wireEvidenceGraph(d){
+  const svg = document.getElementById("evidenceSvg");
+  if (!svg) return;
+  const bd = d.risk_breakdown;
+  const available = EVIDENCE_BUCKET_ORDER.filter(k => bd[k].available);
+  if (!available.length) return;
+
+  const cx = 320, cy = 230, bucketR = 110, findingR = 195;
+  const nodes = [{ id:"center", x:cx, y:cy, r:26, color:`var(--${bandColor(d.overall_score)})`, label:"This submission", sub:d.overall_score+"/100", isCenter:true }];
+  const edges = [];
+
+  available.forEach((key, i) => {
+    const angle = (2*Math.PI*i/available.length) - Math.PI/2;
+    const bx = cx + bucketR*Math.cos(angle), by = cy + bucketR*Math.sin(angle);
+    const b = bd[key];
+    const bucketId = "bucket:"+key;
+    nodes.push({ id:bucketId, x:bx, y:by, r:17, color:`var(--${bandColor(b.score)})`, label:b.label, sub:b.score+"/100", isBucket:true });
+    edges.push([ "center", bucketId ]);
+
+    const findings = d.explanations.filter(f => f.category === key).slice(0, 5);
+    findings.forEach((f, j) => {
+      const spreadAngle = findings.length > 1 ? (j/(findings.length-1) - 0.5) * 0.85 : 0;
+      const fa = angle + spreadAngle;
+      const fx = cx + findingR*Math.cos(fa), fy = cy + findingR*Math.sin(fa);
+      const sevVar = {HIGH:"danger", MEDIUM:"warning", LOW:"info", SAFE:"safe"}[f.severity] || "info";
+      const nodeId = `finding:${key}:${j}`;
+      nodes.push({ id:nodeId, x:fx, y:fy, r:10, color:`var(--${sevVar})`, label:f.signal, sub:f.severity, dashed:f.status==="AI_ASSESSED" });
+      edges.push([ bucketId, nodeId ]);
+    });
+  });
+
+  const byId = Object.fromEntries(nodes.map(n=>[n.id,n]));
+  const edgesSvg = edges.map(([a,b]) => `<line x1="${byId[a].x}" y1="${byId[a].y}" x2="${byId[b].x}" y2="${byId[b].y}" stroke="var(--border)" stroke-width="1.4"/>`).join("");
+  const nodesSvg = nodes.map(n => `
+    <g>
+      <circle cx="${n.x}" cy="${n.y}" r="${n.r}" fill="${n.color}" fill-opacity="${n.isCenter?0.25:0.2}" stroke="${n.color}" stroke-width="2" stroke-dasharray="${n.dashed?'3,2':'none'}"><title>${esc(n.label)} — ${esc(n.sub||'')}</title></circle>
+      ${n.isCenter ? `<text x="${n.x}" y="${n.y+4}" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="13" font-weight="700" fill="var(--text)" style="pointer-events:none;">${d.overall_score}</text>` : ''}
+      <text x="${n.x}" y="${n.y + n.r + 12}" text-anchor="middle" font-family="IBM Plex Sans, sans-serif" font-size="${n.isBucket?10:9}" fill="var(--text-dim)" style="pointer-events:none;">${esc((n.label||'').slice(0, n.isBucket?18:16))}</text>
+    </g>
+  `).join("");
+  svg.innerHTML = edgesSvg + nodesSvg;
 }
 
 /* ---------------------------------------------------------------- SCREENSHOT INTELLIGENCE */
@@ -889,6 +967,9 @@ function renderMethodology(d){
       <div style="margin-top:10px;"><b>Verdict bands (chip color):</b> Genuine ${m.bands_3tier.GENUINE}, Suspicious ${m.bands_3tier.SUSPICIOUS}, Fraudulent ${m.bands_3tier.FRAUDULENT}.</div>
     </div>
     <div class="card-sub" style="margin-top:14px;">Content-pattern weights: ${Object.entries(m.content_weights).map(([k,v])=>`${k.replace(/_/g," ")} (${v})`).join(", ")}. Link risk additionally weighs domain age, WHOIS privacy, suspicious TLDs, shorteners, raw IPs, '@'-obfuscation, redirect hops, unverified TLS, brand impersonation, homoglyphs, and punycode/IDN domains.</div>
+    <div class="methodology-block" style="margin-top:14px;border-left:3px solid #8a5fd6;">
+      <b>AI-assisted semantic analysis (Groq):</b> alongside the regex/lexicon engine, every text submission is also sent to an LLM (${d.ai_analysis && d.ai_analysis.model ? esc(d.ai_analysis.model) : 'openai/gpt-oss-120b'} via Groq) prompted specifically to catch paraphrased or unusually-worded scam language that fixed patterns miss — e.g. "10x for sure" or "my uncle at the exchange says" rather than only literal phrases like "guaranteed" or "act now". Each risk bucket takes the <i>higher</i> of the rule-based score and the LLM's finding in that category — never added on top — so the two systems corroborate rather than double-count. If the API key is missing, the request fails, or the response can't be parsed, analysis proceeds on rule-based signals alone; this is disclosed per-analysis in Limitations, never silently hidden.
+    </div>
     <div class="card-sub" style="margin-top:10px;"><b>What "Not available" means:</b> a signal is shown as Not available when the underlying check could not be performed (e.g. WHOIS lookup failed, domain doesn't resolve, OCR engine unavailable) — it is never silently replaced with a guessed or fabricated value.</div>
   </div>`;
 }
